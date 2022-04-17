@@ -5,7 +5,7 @@
       <paths name="yangli@100.68.27.41:22 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/yangli/3DSyn" local="$PROJECT_DIR$" />
+            <mapping deploy="3DSyn" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
