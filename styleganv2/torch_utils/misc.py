@@ -129,6 +129,7 @@ class InfiniteSampler(torch.utils.data.Sampler):
             rnd.shuffle(order)
             window = int(np.rint(order.size * self.window_size))
 
+
         idx = 0
         while True:
             i = idx % order.size

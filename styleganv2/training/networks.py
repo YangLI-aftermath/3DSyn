@@ -22,7 +22,7 @@ def normalize_2nd_moment(x, dim=1, eps=1e-8):
     return x * (x.square().mean(dim=dim, keepdim=True) + eps).rsqrt()
 
 #----------------------------------------------------------------------------
-
+# Mod->DeMod->(upsample)->conv
 @misc.profiled_function
 def modulated_conv2d(
     x,                          # Input tensor of shape [batch_size, in_channels, in_height, in_width].
@@ -72,6 +72,7 @@ def modulated_conv2d(
         return x
 
     # Execute as one fused op using grouped convolution.
+    # Only executed if fused_modconv == false
     with misc.suppress_tracer_warnings(): # this value will be treated as a constant
         batch_size = int(batch_size)
     misc.assert_shape(x, [batch_size, in_channels, None, None])
@@ -101,6 +102,8 @@ class FullyConnectedLayer(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.full([out_features], np.float32(bias_init))) if bias else None
         self.weight_gain = lr_multiplier / np.sqrt(in_features)
         self.bias_gain = lr_multiplier
+
+    # What is gain?
 
     def forward(self, x):
         w = self.weight.to(x.dtype) * self.weight_gain
@@ -725,5 +728,42 @@ class Discriminator(torch.nn.Module):
             cmap = self.mapping(None, c)
         x = self.b4(x, img, cmap)
         return x
+
+@persistence.persistent_class
+class SignalEncode(torch.nn.Module):
+    def __init__(self,
+        frequency,     # signal frequency, output channel = 2t
+        w_dim,         # w latent code dimension
+    ):
+        super().__init__()
+        self.w_dim = w_dim
+        self.frequency = frequency
+        self.FC_1 = FullyConnectedLayer(in_features=2*frequency, out_features=w_dim)
+        self.FC_2 = FullyConnectedLayer(in_features=w_dim, out_features=w_dim)
+        self.multiplier = torch.arange(1,frequency+1)
+
+    def forward(self,
+                angle,
+                w_d       # Original w_d transformed from z_d through MappingNetwork
+        ):
+
+        # Frequency Sampling
+        angles = self.multiplier * angle
+        sin_angles = angles.sin()
+        cos_angles = angles.cos()
+        angles_encode = torch.cat((sin_angles,cos_angles))
+
+        # 2-layer FC: 2t -> w_dim
+        angles_encode=angles_encode.unsqueeze(0)
+        angles_inter = self.FC_1(angles_encode)
+        w_angle = self.FC_2(angles_inter)
+        w_angle_d = w_angle * w_d
+
+        return w_angle_d
+
+
+
+
+
 
 #----------------------------------------------------------------------------
