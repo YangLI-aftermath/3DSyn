@@ -61,6 +61,8 @@ def bias_act(x, b=None, dim=1, act='linear', alpha=None, gain=None, clamp=None, 
     using standard PyTorch ops. It supports first and second order gradients,
     but not third order gradients.
 
+
+
     Args:
         x:      Input activation tensor. Can be of any shape.
         b:      Bias vector, or `None` to disable. Must be a 1D tensor of the same type
@@ -81,6 +83,9 @@ def bias_act(x, b=None, dim=1, act='linear', alpha=None, gain=None, clamp=None, 
 
     Returns:
         Tensor of the same shape and datatype as `x`.
+        clamp (gain * act(x+b)), x > 0
+        clamp (alpha * gain * act(x+b)), x < 0
+
     """
     assert isinstance(x, torch.Tensor)
     assert impl in ['ref', 'cuda']
@@ -111,6 +116,7 @@ def _bias_act_ref(x, b=None, dim=1, act='linear', alpha=None, gain=None, clamp=N
     # Evaluate activation function.
     alpha = float(alpha)
     x = spec.func(x, alpha=alpha)
+
 
     # Scale by gain.
     gain = float(gain)

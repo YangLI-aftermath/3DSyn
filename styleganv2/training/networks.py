@@ -153,7 +153,7 @@ class Conv2dLayer(torch.nn.Module):
         if trainable:
             self.weight = torch.nn.Parameter(weight)
             self.bias = torch.nn.Parameter(bias) if bias is not None else None
-        else:
+        else: # Not a trainable parameter, but a persistent state. Can be called by name specified.
             self.register_buffer('weight', weight)
             if bias is not None:
                 self.register_buffer('bias', bias)
@@ -161,14 +161,15 @@ class Conv2dLayer(torch.nn.Module):
                 self.bias = None
 
     def forward(self, x, gain=1):
-        w = self.weight * self.weight_gain
+        w = self.weight * self.weight_gain # If not trainble, weight is from buffer
         b = self.bias.to(x.dtype) if self.bias is not None else None
         flip_weight = (self.up == 1) # slightly faster
+        # downsample + conv +upsample
         x = conv2d_resample.conv2d_resample(x=x, w=w.to(x.dtype), f=self.resample_filter, up=self.up, down=self.down, padding=self.padding, flip_weight=flip_weight)
 
         act_gain = self.act_gain * gain
         act_clamp = self.conv_clamp * gain if self.conv_clamp is not None else None
-        x = bias_act.bias_act(x, b, act=self.activation, gain=act_gain, clamp=act_clamp)
+        x = bias_act.bias_act(x, b, act=self.activation, gain=act_gain, clamp=act_clamp) # Scale output by gain and Clamp output to [-Clamp, Clamp]
         return x
 
 #----------------------------------------------------------------------------
@@ -265,7 +266,7 @@ class SynthesisLayer(torch.nn.Module):
         use_noise       = True,         # Enable noise input?
         activation      = 'lrelu',      # Activation function: 'relu', 'lrelu', etc.
         resample_filter = [1,3,3,1],    # Low-pass filter to apply when resampling activations.
-        conv_clamp      = None,         # Clamp the output of convolution layers to +-X, None = disable clamping.
+        conv_clamp      = None,         # Clamp the output of convolution layers to +-conv_clamp, None = disable clamping.
         channels_last   = False,        # Use channels_last format for the weights?
     ):
         super().__init__()
@@ -279,12 +280,12 @@ class SynthesisLayer(torch.nn.Module):
         self.act_gain = bias_act.activation_funcs[activation].def_gain
 
         self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)
-        memory_format = torch.channels_last if channels_last else torch.contiguous_format
+        memory_format = torch.channels_last if channels_last else torch.contiguous_format # What's its strength?
         self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
         if use_noise:
             self.register_buffer('noise_const', torch.randn([resolution, resolution]))
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
-        self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
+        self.bias = torch.nn.Parameter(torch.zeros([out_channels])) # make bias trainable
 
     def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1):
         assert noise_mode in ['random', 'const', 'none']
@@ -293,12 +294,13 @@ class SynthesisLayer(torch.nn.Module):
         styles = self.affine(w)
 
         noise = None
+        # If strength is [], is it per-channel?
         if self.use_noise and noise_mode == 'random':
             noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
         if self.use_noise and noise_mode == 'const':
             noise = self.noise_const * self.noise_strength
 
-        flip_weight = (self.up == 1) # slightly faster
+        flip_weight = (self.up == 1) # correlation function is slightly faster
         x = modulated_conv2d(x=x, weight=self.weight, styles=styles, noise=noise, up=self.up,
             padding=self.padding, resample_filter=self.resample_filter, flip_weight=flip_weight, fused_modconv=fused_modconv)
 
@@ -327,7 +329,7 @@ class ToRGBLayer(torch.nn.Module):
         return x
 
 #----------------------------------------------------------------------------
-
+# synthesisblock = 2 * synthesislayer (2 conv if not const input else 1 conv)
 @persistence.persistent_class
 class SynthesisBlock(torch.nn.Module):
     def __init__(self,
@@ -358,8 +360,9 @@ class SynthesisBlock(torch.nn.Module):
         self.num_conv = 0
         self.num_torgb = 0
 
+        # First Block Const Input?
         if in_channels == 0:
-            self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
+            self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution])) # Trainable?
 
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
@@ -455,6 +458,7 @@ class SynthesisNetwork(torch.nn.Module):
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb
+
             setattr(self, f'b{res}', block)
 
     def forward(self, ws, **block_kwargs):
@@ -728,40 +732,6 @@ class Discriminator(torch.nn.Module):
             cmap = self.mapping(None, c)
         x = self.b4(x, img, cmap)
         return x
-
-@persistence.persistent_class
-class SignalEncode(torch.nn.Module):
-    def __init__(self,
-        frequency,     # signal frequency, output channel = 2t
-        w_dim,         # w latent code dimension
-    ):
-        super().__init__()
-        self.w_dim = w_dim
-        self.frequency = frequency
-        self.FC_1 = FullyConnectedLayer(in_features=2*frequency, out_features=w_dim)
-        self.FC_2 = FullyConnectedLayer(in_features=w_dim, out_features=w_dim)
-        self.multiplier = torch.arange(1,frequency+1)
-
-    def forward(self,
-                angle,
-                w_d       # Original w_d transformed from z_d through MappingNetwork
-        ):
-
-        # Frequency Sampling
-        angles = self.multiplier * angle
-        sin_angles = angles.sin()
-        cos_angles = angles.cos()
-        angles_encode = torch.cat((sin_angles,cos_angles))
-
-        # 2-layer FC: 2t -> w_dim
-        angles_encode=angles_encode.unsqueeze(0)
-        angles_inter = self.FC_1(angles_encode)
-        w_angle = self.FC_2(angles_inter)
-        w_angle_d = w_angle * w_d
-
-        return w_angle_d
-
-
 
 
 
