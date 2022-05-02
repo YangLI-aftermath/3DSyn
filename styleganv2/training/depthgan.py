@@ -7,6 +7,7 @@ from torch_utils.ops import upfirdn2d
 from torch_utils.ops import bias_act
 from torch_utils.ops import fma
 from training.networks import *
+import torch.nn.functional as F
 
 
 @persistence.persistent_class
@@ -48,10 +49,10 @@ class SynthesisBlockPrior(torch.nn.Module):
             self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution])) # Trainable?
 
         if in_channels != 0:
+            self.conv_inter_0 = Conv2dLayer(in_channels=2 * in_channels, out_channels=in_channels,
+                                            kernel_size=1)  # compress to in_channel for conv0
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
-            self.conv_inter_0 = Conv2dLayer(in_channels=2 * out_channels, out_channels=out_channels,
-                                            kernel_size=1)  # compress to out_channel
             self.num_conv += 1
 
         self.conv_inter_1 = Conv2dLayer(in_channels=2 * out_channels, out_channels=out_channels, kernel_size=1)
@@ -240,11 +241,12 @@ class SynthesisNetworkDepth(torch.nn.Module):
             out_channels = channels_dict[res]
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
-            block = SynthesisBlockPrior(in_channels, out_channels, w_dim=w_dim, resolution=res,
+            block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
                 img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
-            self.num_ws += block.num_conv
-            if is_last:
-                self.num_ws += block.num_torgb
+            # self.num_ws += block.num_conv
+            self.num_ws += block.num_conv + block.num_torgb
+            # if is_last:
+                # self.num_ws += block.num_torgb
 
             setattr(self, f'b{res}', block)
 
@@ -257,7 +259,8 @@ class SynthesisNetworkDepth(torch.nn.Module):
             for res in self.block_resolutions:
                 block = getattr(self, f'b{res}')
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
-                w_idx += block.num_conv
+                # w_idx += block.num_conv
+                w_idx += block.num_conv + block.num_torgb
 
         x = img = None
         for res, cur_ws in zip(self.block_resolutions, block_ws):
@@ -308,6 +311,7 @@ class GeneratorDepth(torch.nn.Module):
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output resolution.
         img_channels,               # Number of output color channels.
+        frequency,                  # Frequency of Signal Encode
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         synthesis_kwargs    = {},   # Arguments for SynthesisNetwork.
     ):
@@ -320,9 +324,17 @@ class GeneratorDepth(torch.nn.Module):
         self.synthesis = SynthesisNetworkDepth(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        self.signalencode = SignalEncode(frequency=frequency,w_dim=w_dim)
+        # Use wsa in the first two layers
+        self.num_wsa = self.synthesis.b4.num_torgb + self.synthesis.b4.num_conv + self.synthesis.b8.num_torgb + self.synthesis.b8.num_conv
 
-    def forward(self, z, c, temp_feature, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
+    def forward(self, z, c, angle, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
+        ws_single = ws[:,0,:]
+        wsa = self.signalencode(angle,ws_single)
+        # Use wsa in the first two layers
+        wsa = wsa.unsqueeze(1).repeat([1, self.num_wsa, 1])
+        ws[:,0:self.num_wsa,:] = wsa
         img = self.synthesis(ws, **synthesis_kwargs)
         return img
 
@@ -383,7 +395,7 @@ class DiscriminatorBlockDepth(torch.nn.Module):
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
     def forward(self, x, img, force_fp32=False):
-        assert x.shape[1] in [self.img_channels, self.img_channels+1]
+        assert img.shape[1] in [self.img_channels, self.img_channels+1]
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
         memory_format = torch.channels_last if self.channels_last and not force_fp32 else torch.contiguous_format
 
@@ -396,16 +408,16 @@ class DiscriminatorBlockDepth(torch.nn.Module):
         if self.in_channels == 0:
             misc.assert_shape(img, [None, None, self.resolution, self.resolution])
             img = img.to(dtype=dtype, memory_format=memory_format)
-            if x.shape[0] == self.img_channels: # RGB Input
+            if img.shape[1] == self.img_channels: # RGB Input
                 y = self.fromrgb(img)
                 x = x + y if x is not None else y
-                img = upfirdn2d.downsample2d(img, self.resample_filter) if self.architecture == 'skip' else None
+                # img = upfirdn2d.downsample2d(img, self.resample_filter) if self.architecture == 'skip' else None
             else: # RGBD Input
-                x_tuple = x.split(3,dim=1)
-                x_rgb = x_tuple[0]
-                x_d = x_tuple[1]
-                y_rgb =self.fromrgb(x_rgb)
-                y_d = self.fromdepth(x_d)
+                img_tuple = img.split(3,dim=1)
+                img_rgb = img_tuple[0]
+                img_d = img_tuple[1]
+                y_rgb =self.fromrgb(img_rgb)
+                y_d = self.fromdepth(img_d)
                 x = y_rgb + y_d
 
 
@@ -439,7 +451,7 @@ class DepthPredictionBlock(torch.nn.Module):
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
         freeze_layers       = 0,            # Freeze-D: Number of layers to freeze.
     ):
-        assert in_channels in [0, tmp_channels]
+        # assert in_channels in [0, tmp_channels, 2*tmp_channels]
         assert architecture in ['orig', 'skip', 'resnet']
         super().__init__()
         self.in_channels = in_channels
@@ -461,17 +473,19 @@ class DepthPredictionBlock(torch.nn.Module):
         trainable_iter = trainable_gen()
 
         self.conv_compress = Conv2dLayer(in_channels, tmp_channels, kernel_size=1, activation=activation,
+                                         trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
+
+        # Two Layer Simple Conv
+        self.conv0 = Conv2dLayer(tmp_channels, tmp_channels, kernel_size=3, activation='linear',
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
 
-        self.conv0 = Conv2dLayer(tmp_channels, tmp_channels, kernel_size=3, activation=activation,
-            trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
-
-        self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, up=2,
+        self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation='linear', up=1,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
-
+        # Use upfird2d or Conv2d?
         if architecture == 'resnet':
-            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, up=2,
+            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, up=1,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
+
 
     def forward(self, x, force_fp32=False):
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
@@ -486,10 +500,11 @@ class DepthPredictionBlock(torch.nn.Module):
 
         # Main layers.
         if self.architecture == 'resnet':
+            y = self.conv0(x, gain=np.sqrt(0.5))
+            x.add_(y)
             y = self.skip(x, gain=np.sqrt(0.5))
-            x = self.conv0(x)
             x = self.conv1(x, gain=np.sqrt(0.5))
-            x = y.add_(x)
+            x.add_(y)
         else:
             x = self.conv0(x)
             x = self.conv1(x)
@@ -510,6 +525,7 @@ class SwitchDiscriminator(torch.nn.Module):
         num_fp16_res        = 0,        # Use FP16 for the N highest resolutions.
         conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
+        resample_filter     =[1,3,3,1], # For upfird2d.upsample2d
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
@@ -521,6 +537,7 @@ class SwitchDiscriminator(torch.nn.Module):
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
         self.block_resolutions = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
+        self.resample_filter = resample_filter
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
@@ -544,18 +561,74 @@ class SwitchDiscriminator(torch.nn.Module):
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    # Depth Prediction
-        self.up_resolutions = [2 ** i for i in range(self.img_resolution_log2, 4, -1)]
+    # Depth Prediction Blocks
+        self.up_resolutions = [2 ** i for i in range(4,self.img_resolution_log2+1)]
+        for res in self.up_resolutions:
+            in_channels = channels_dict[res] + channels_dict[res//2] if res>16 and res<self.img_resolution else channels_dict[res]
+            # no img_resolution feature
+            if res == img_resolution:
+                in_channels = channels_dict[res//2]
+            tmp_channels = channels_dict[res]
+            out_channels = channels_dict[res]
+            use_fp16 = (res >= fp16_resolution)
+            block = DepthPredictionBlock(in_channels, tmp_channels, out_channels, resolution=res,
+                first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
+            setattr(self, f'd{res}', block)
+            cur_layer_idx += block.num_layers
+
+    # Final Depth Map Output
+        self.conv_last = Conv2dLayer(channels_dict[img_resolution], depth_bit, kernel_size=3, activation='linear', up=1,
+             conv_clamp=conv_clamp)
+        self.softmax = torch.nn.Softmax(dim=1)
+
+    def forward(self, img, c, mod, **block_kwargs): # mod(str) in ['depth', 'score']
+        assert mod in ['depth','score']
+        if mod == 'score':
+            x = None
+            for res in self.block_resolutions:
+                block = getattr(self, f'b{res}')
+                x, img = block(x, img, **block_kwargs)
+
+            cmap = None
+            if self.c_dim > 0:
+                cmap = self.mapping(None, c)
+            x = self.b4(x, img, cmap)
+            return x
+
+        else:
+            x = None
+            temp_feature = {}
+            down_resolutions = [2 ** i for i in range(self.img_resolution_log2,4,-1)]
+            for res in down_resolutions:
+                block = getattr(self, f'b{res}')
+                x, img = block(x, img, **block_kwargs) # Save Features
+                temp_feature[res//2] = x
+
+            for res in self.up_resolutions:
+                if res == 16:
+                    block = getattr(self, f'd{res}')
+                    x = block(temp_feature[res], **block_kwargs)
+
+                elif res == self.img_resolution:
+                    x = F.interpolate(x,scale_factor=2)
+                    block = getattr(self, f'd{res}')
+                    x = block(x, **block_kwargs)
+
+                else:
+                    x = F.interpolate(x, scale_factor=2)
+                    x = torch.cat((x,temp_feature[res]),dim=1) # cat along channel
+                    block = getattr(self, f'd{res}')
+                    x = block(x, **block_kwargs)
+
+            # Final Depth Output
+
+            x = self.conv_last(x)
+            out = self.softmax(x)
+            return out
 
 
-    def forward(self, img, c, mod, **block_kwargs): # mod(str) in ['depth', 'rgb']
-        x = None
-        for res in self.block_resolutions:
-            block = getattr(self, f'b{res}')
-            x, img = block(x, img, **block_kwargs)
 
-        cmap = None
-        if self.c_dim > 0:
-            cmap = self.mapping(None, c)
-        x = self.b4(x, img, cmap)
-        return x
+
+
+
+
