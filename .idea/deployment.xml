@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="yangli@100.68.27.41:22 password" remoteFilesAllowedToDisappearOnAutoupload="false" autoUploadExternalChanges="true">
+  <component name="PublishConfigData" autoUpload="Always" serverName="dvlab-hkust" remoteFilesAllowedToDisappearOnAutoupload="false" autoUploadExternalChanges="true">
     <serverData>
-      <paths name="yangli@100.68.27.41:22 password">
+      <paths name="dvlab-hkust">
         <serverdata>
           <mappings>
             <mapping deploy="3DSyn" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="smartmore">
+        <serverdata>
+          <mappings>
+            <mapping deploy="3DSyn" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

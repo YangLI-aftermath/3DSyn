@@ -1,4 +1,7 @@
 import sys
+
+import numpy as np
+
 sys.path.append('/Users/menglidaren/Desktop/repo/3DSyn/styleganv2')
 import torch
 import styleganv2.training.depthgan as dp

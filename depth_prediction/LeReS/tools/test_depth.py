@@ -1,3 +1,7 @@
+import sys
+sys.path.append('/home/yangli/3DSyn/depth_prediction/LeReS/')
+# sys.path.append('/Users/menglidaren/Desktop/repo/3DSyn/depth_prediction/LeReS')
+
 from lib.multi_depth_model_woauxi import RelDepthModel
 from lib.net_tools import load_ckpt
 import matplotlib.pyplot as plt
@@ -13,6 +17,7 @@ def parse_args():
         description='Configs for LeReS')
     parser.add_argument('--load_ckpt', default='./res50.pth', help='Checkpoint path to load')
     parser.add_argument('--backbone', default='resnext101', help='Checkpoint path to load')
+    parser.add_argument('--test_path', default='../test_images', help='test path')
 
     args = parser.parse_args()
     return args
@@ -48,15 +53,15 @@ if __name__ == '__main__':
     load_ckpt(args, depth_model, None, None)
     depth_model.cuda()
 
-    image_dir = os.path.dirname(os.path.dirname(__file__)) + '/test_images/'
+    image_dir = args.test_path
     imgs_list = os.listdir(image_dir)
     imgs_list.sort()
-    imgs_path = [os.path.join(image_dir, i) for i in imgs_list if i != 'outputs']
-    image_dir_out = image_dir + '/outputs'
+    imgs_path = [os.path.join(image_dir, i) for i in imgs_list if i != 'depth']
+    image_dir_out = image_dir + '/depth'
     os.makedirs(image_dir_out, exist_ok=True)
 
     for i, v in enumerate(imgs_path):
-        print('processing (%04d)-th image... %s' % (i, v))
+        print('processing (%08d)-th image... %s' % (i, v))
         rgb = cv2.imread(v)
         rgb_c = rgb[:, :, ::-1].copy()
         gt_depth = None
@@ -67,11 +72,13 @@ if __name__ == '__main__':
         pred_depth = depth_model.inference(img_torch).cpu().numpy().squeeze()
         pred_depth_ori = cv2.resize(pred_depth, (rgb.shape[1], rgb.shape[0]))
 
+        print('predicted depth of %08d-th image: max=%.5f and min=%.5f' % (i,np.max(pred_depth_ori),np.min(pred_depth_ori)))
         # if GT depth is available, uncomment the following part to recover the metric depth
         #pred_depth_metric = recover_metric_depth(pred_depth_ori, gt_depth)
+        np.save('depth'+str(i),pred_depth_ori)
 
-        img_name = v.split('/')[-1]
-        cv2.imwrite(os.path.join(image_dir_out, img_name), rgb)
+        # img_name = v.split('/')[-1]
+        # cv2.imwrite(os.path.join(image_dir_out, img_name), rgb)
         # save depth
-        plt.imsave(os.path.join(image_dir_out, img_name[:-4]+'-depth.png'), pred_depth_ori, cmap='rainbow')
-        cv2.imwrite(os.path.join(image_dir_out, img_name[:-4]+'-depth_raw.png'), (pred_depth_ori/pred_depth_ori.max() * 60000).astype(np.uint16))
+        # plt.imsave(os.path.join(image_dir_out, img_name[:-4]+'-depth.png'), pred_depth_ori, cmap='rainbow')
+        # cv2.imwrite(os.path.join(image_dir_out, img_name[:-4]+'-depth_raw.png'), (pred_depth_ori/pred_depth_ori.max() * 60000).astype(np.uint16))

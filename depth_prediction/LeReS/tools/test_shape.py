@@ -1,3 +1,7 @@
+import sys
+sys.path.append('/home/yangli/3DSyn/depth_prediction/LeReS/')
+# sys.path.append('/data/home/yokoli/3DSyn/depth_prediction/LeReS/')
+
 from lib.multi_depth_model_woauxi import RelDepthModel
 from lib.net_tools import load_ckpt
 from lib.spvcnn_classsification import SPVCNN_CLASSIFICATION
@@ -11,10 +15,13 @@ import numpy as np
 import torch
 from lib.test_utils import refine_focal, refine_shift
 
+# CUDA Config
+# os.environ["CUDA_VISIBLE_DEVICES"]='3'
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Configs for LeReS')
-    parser.add_argument('--load_ckpt', default='./res50.pth', help='Checkpoint path to load')
+    parser.add_argument('--load_ckpt', default='./res101.pth', help='Checkpoint path to load')
     parser.add_argument('--backbone', default='resnext101', help='Checkpoint path to load')
 
     args = parser.parse_args()
@@ -102,6 +109,9 @@ if __name__ == '__main__':
     imgs_list = os.listdir(image_dir)
     imgs_list.sort()
     imgs_path = [os.path.join(image_dir, i) for i in imgs_list if i != 'outputs']
+    if 'outputs' in imgs_path:
+        imgs_path.remove('outputs')
+    # image_dir_out = os.path.dirname(os.path.dirname(__file__)) + '/outputs'
     image_dir_out = image_dir + '/outputs'
     os.makedirs(image_dir_out, exist_ok=True)
 

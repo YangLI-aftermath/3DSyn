@@ -1,0 +1,1 @@
+python 3DSyn/depth_prediction/LeReS/tools/test_depth.py --load_ckpt res101.pth --backbone resnext101
